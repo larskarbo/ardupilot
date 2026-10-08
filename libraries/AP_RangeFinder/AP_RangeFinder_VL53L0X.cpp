@@ -19,6 +19,7 @@
   the ST example code
  */
 #include "AP_RangeFinder_VL53L0X.h"
+#include <GCS_MAVLink/GCS.h>
 
 #if AP_RANGEFINDER_VL53L0X_ENABLED
 
@@ -554,6 +555,18 @@ bool AP_RangeFinder_VL53L0X::setMeasurementTimingBudget(uint32_t budget_us)
 
 bool AP_RangeFinder_VL53L0X::init()
 {
+    if (!configure()) {
+        return false;
+    }
+
+    // call timer() every 33ms. We expect new data to be available every 33ms
+    dev->register_periodic_callback(33000,
+                                    FUNCTOR_BIND_MEMBER(&AP_RangeFinder_VL53L0X::timer, void));
+    return true;
+}
+
+bool AP_RangeFinder_VL53L0X::configure()
+{
     // setup for 2.8V operation
     write_register(VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV,
                    read_register(VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV) | 0x01);
@@ -669,10 +682,7 @@ bool AP_RangeFinder_VL53L0X::init()
     write_register(SYSTEM_SEQUENCE_CONFIG, 0xE8);
 
     start_continuous();
-
-    // call timer() every 33ms. We expect new data to be available every 33ms
-    dev->register_periodic_callback(33000,
-                                    FUNCTOR_BIND_MEMBER(&AP_RangeFinder_VL53L0X::timer, void));
+    last_measurement_ms = AP_HAL::millis();
     return true;
 }
 
@@ -776,10 +786,48 @@ void AP_RangeFinder_VL53L0X::update(void)
 
 void AP_RangeFinder_VL53L0X::timer(void)
 {
+    const uint32_t now_ms = AP_HAL::millis();
     uint16_t range_mm;
-    if (get_reading(range_mm) && range_mm < 8000) {
-        sum_mm += range_mm;
-        counter++;
+    if (get_reading(range_mm)) {
+        last_measurement_ms = now_ms;
+        if (range_mm < 8000) {
+            sum_mm += range_mm;
+            counter++;
+        }
+        return;
+    }
+    // the sensor can be reset to its power-on defaults after init() (seen at ESC power-up):
+    // it still answers on I2C but never flags a finished measurement again
+    if (now_ms - last_measurement_ms > 1000 && now_ms - last_reconfigure_ms > 1000) {
+        last_reconfigure_ms = now_ms;
+        if (!check_id()) {
+            // not answering: don't hold the bus with a configure() that can only time out
+            return;
+        }
+        // start from the same state as at power-up: a configure() over the running
+        // continuous ranging times out in the reference calibration
+        soft_reset();
+        const bool ok = configure();
+        if (ok || reconfigure_failures++ == 0) {
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "VL53L0X: no data, re-init %s", ok ? "ok" : "failed (retrying)");
+        }
+        if (ok) {
+            reconfigure_failures = 0;
+        }
+    }
+}
+
+void AP_RangeFinder_VL53L0X::soft_reset(void)
+{
+    // SOFT_RESET_GO2_SOFT_RESET_N, as VL53L0X_ResetDevice(): low, wait for the model ID
+    // to read 0, high, wait for it to come back
+    write_register(0xBF, 0x00);
+    for (uint8_t i = 0; i < 10 && read_register(0xC0) != 0x00; i++) {
+        hal.scheduler->delay(1);
+    }
+    write_register(0xBF, 0x01);
+    for (uint8_t i = 0; i < 10 && read_register(0xC0) != 0xEE; i++) {
+        hal.scheduler->delay(1);
     }
 }
 

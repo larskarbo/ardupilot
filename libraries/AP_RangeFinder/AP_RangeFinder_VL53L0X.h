@@ -29,6 +29,9 @@ private:
     AP_RangeFinder_VL53L0X(RangeFinder::RangeFinder_State &_state, AP_RangeFinder_Params &_params, AP_HAL::OwnPtr<AP_HAL::I2CDevice> dev);
 
     __INITFUNC__ bool init();
+    // full sensor set-up; also re-run from timer() after the sensor lost its config
+    bool configure();
+    void soft_reset();
     void timer();
 
     // check sensor ID
@@ -78,6 +81,9 @@ private:
     void start_continuous(void);
     
     uint8_t stop_variable;
+    uint32_t last_measurement_ms;
+    uint32_t last_reconfigure_ms;
+    uint8_t reconfigure_failures;
     uint32_t measurement_timing_budget_us;
     uint32_t start_ms;
 
